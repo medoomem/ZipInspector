@@ -1,0 +1,5 @@
+flask>=3.0.0
+requests>=2.31.0
+remotezip>=0.12.3
+zstandard>=0.22.0
+zipfile-deflate64>=0.2.0
