@@ -1,6 +1,6 @@
 @echo off
 setlocal
-title Remote Archive Inspector
+title ZipInspector Updater
 cd /d "%~dp0"
 
 set "GITHUB_USER=medoomem"
@@ -19,13 +19,14 @@ echo [*] Checking for updates...
 if not exist "%PY_NAME%" (
     echo [*] Downloading %PY_NAME%...
     curl -s -f -L -R -o "%PY_NAME%" "%RAW_BASE%/%PY_NAME%"
+    echo [*] %PY_NAME% downloaded!
 ) else (
     curl -s -f -L -R -z "%PY_NAME%" -o "%PY_NAME%.tmp" "%RAW_BASE%/%PY_NAME%"
     if exist "%PY_NAME%.tmp" (
         move /y "%PY_NAME%.tmp" "%PY_NAME%" >nul 2>&1
         echo [*] %PY_NAME% was updated!
     ) else (
-        echo [*] %PY_NAME% is up to date.
+        echo [*] %PY_NAME% is already up to date.
     )
 )
 
@@ -35,26 +36,16 @@ if not exist "%PY_NAME%" (
 if not exist "%EXE_NAME%" (
     echo [*] Downloading %EXE_NAME%...
     curl -s -f -L -R -o "%EXE_NAME%" "%RAW_BASE%/%EXE_NAME%"
+    echo [*] %EXE_NAME% downloaded!
 ) else (
     curl -s -f -L -R -z "%EXE_NAME%" -o "%EXE_NAME%.tmp" "%RAW_BASE%/%EXE_NAME%"
     if exist "%EXE_NAME%.tmp" (
         move /y "%EXE_NAME%.tmp" "%EXE_NAME%" >nul 2>&1
         echo [*] %EXE_NAME% was updated!
     ) else (
-        echo [*] %EXE_NAME% is up to date.
+        echo [*] %EXE_NAME% is already up to date.
     )
 )
 
-:: ==========================================
-:: 3. Launch Application
-:: ==========================================
-echo [*] Starting %EXE_NAME%...
-start "" cmd /c "timeout /t 2 /nobreak >nul & start http://127.0.0.1:7860"
-
-if exist "%EXE_NAME%" (
-    "%EXE_NAME%"
-) else if exist "%PY_NAME%" (
-    python "%PY_NAME%"
-)
-
+echo [*] Done!
 pause
