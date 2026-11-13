@@ -10,18 +10,21 @@ set "RAW_BASE=https://raw.githubusercontent.com/%GITHUB_USER%/%GITHUB_REPO%/%BRA
 
 echo [*] Checking for updates...
 
-:: Loop through all files to update only if newer
 for %%F in (requirements.txt fileex2.py) do (
-    if not exist "%%F" (
-        echo [*] Downloading %%F...
-        curl -s -f -L -R -o "%%F" "%RAW_BASE%/%%F"
-        echo [*] %%F downloaded!
+    curl -s -f -L -o "%%F.tmp" "%RAW_BASE%/%%F"
+    if errorlevel 1 (
+        if exist "%%F.tmp" del /q "%%F.tmp" >nul 2>&1
+        echo [!] Failed to check %%F - offline or not found on GitHub.
+    ) else if not exist "%%F" (
+        move /y "%%F.tmp" "%%F" >nul 2>&1
+        echo [+] %%F downloaded!
     ) else (
-        curl -s -f -L -R -z "%%F" -o "%%F.tmp" "%RAW_BASE%/%%F"
-        if exist "%%F.tmp" (
+        fc /b "%%F" "%%F.tmp" >nul 2>&1
+        if errorlevel 1 (
             move /y "%%F.tmp" "%%F" >nul 2>&1
-            echo [*] %%F was updated!
+            echo [+] %%F was updated!
         ) else (
+            del /q "%%F.tmp" >nul 2>&1
             echo [*] %%F is already up to date.
         )
     )
