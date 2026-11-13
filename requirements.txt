@@ -1,5 +1,19 @@
+# Core dependencies
 flask>=3.0.0
 requests>=2.31.0
 remotezip>=0.12.3
+
+# Optional ZIP compression methods (safe to omit if unavailable; app falls back gracefully)
 zstandard>=0.22.0
 zipfile-deflate64>=0.2.0
+
+# Production WSGI server for Linux / Docker / Spaces (skipped automatically on Windows)
+gunicorn>=21.2.0; platform_system != "Windows"
+
+# ----------------------------------------------------------------------
+# External tools (NOT installed by pip):
+# - 7-Zip (7z / 7zz with RAR5 support) or WinRAR (unrar):
+#   Only needed to preview compressed RAR entries (e.g. .txt/.json/.png inside solid RARs).
+#   ZIP archives, RAR directory listing, and Stored (uncompressed) RAR downloads work without it.
+#   Tip: If 7z/unrar is in a custom folder, set the RAR_EXTRACTOR environment variable.
+# ----------------------------------------------------------------------
