@@ -3836,23 +3836,141 @@ def _rar_zip_response(url, matched_files, zip_name):
                     headers=_attachment_headers(zip_name, total, "application/zip"))
 
 
-def _zip_response(url, picker, zip_name):
-    session = _new_session(url)
+def _fetch_range_retry(url, off, n):
+    for attempt in range(MAX_MEMBER_RETRIES + 1):
+        try:
+            data = fetch_range(url, off, n)
+            if len(data) != n:
+                raise IOError(f"Short read: got {len(data)} of {n} bytes")
+            return data
+        except Exception:
+            if attempt >= MAX_MEMBER_RETRIES:
+                raise
+            time.sleep(min(2 ** attempt, 10))
+
+
+def _stream_stored_parallel(url, info):
+    """Stream a large STORED ZIP member across 4 parallel 1 MB Range connections (bypasses 1-stream proxy throttling)."""
+    hdr = _fetch_range_retry(url, info.header_offset, 30)
+    sig, _, _, _, _, _, _, _, _, fn_len, ex_len = struct.unpack('<4sHHHHHIIIHH', hdr)
+    if sig != b'PK\x03\x04':
+        raise IOError(f"Invalid local header for {info.filename}")
+    data_start = info.header_offset + 30 + fn_len + ex_len
+
+    part_sz = 1024 * 1024  # 1 MB chunks
+    total = info.file_size
+    offsets = list(range(0, total, part_sz))
+    crc = 0
+    ex = ThreadPoolExecutor(max_workers=4)
+    in_flight = {}
+    next_q = 0
     try:
-        members = picker(session.get())
+        while next_q < len(offsets) and len(in_flight) < 6:
+            o = offsets[next_q]
+            in_flight[next_q] = ex.submit(_fetch_range_retry, url, data_start + o, min(part_sz, total - o))
+            next_q += 1
+        for i in range(len(offsets)):
+            chunk = in_flight.pop(i).result()
+            while next_q < len(offsets) and len(in_flight) < 6:
+                o = offsets[next_q]
+                in_flight[next_q] = ex.submit(_fetch_range_retry, url, data_start + o, min(part_sz, total - o))
+                next_q += 1
+            crc = zlib.crc32(chunk, crc)
+            yield chunk
+    finally:
+        for fut in in_flight.values():
+            fut.cancel()
+        ex.shutdown(wait=False)
+
+    if (crc & 0xFFFFFFFF) != info.CRC:
+        raise IOError(f"CRC mismatch for {info.filename}")
+
+
+def _fetch_zip_member_small(url, info):
+    for attempt in range(MAX_MEMBER_RETRIES + 1):
+        try:
+            data = b"".join(_iter_zip_member_direct(url, info))
+            if (zlib.crc32(data) & 0xFFFFFFFF) != info.CRC:
+                raise IOError(f"CRC mismatch for {info.filename}")
+            return data
+        except Exception:
+            if attempt >= MAX_MEMBER_RETRIES:
+                raise
+            time.sleep(min(2 ** attempt, 10))
+
+
+def stream_zip_fast(url, records, trailer):
+    """Stream a ZIP archive with 6-thread parallel lookahead on small/medium files."""
+    SMALL_LIMIT = 8 * 1024 * 1024
+    MAX_INFLIGHT_BYTES = 24 * 1024 * 1024
+    ex = ThreadPoolExecutor(max_workers=6)
+    in_flight = {}
+    buffered_bytes = 0
+    next_idx = 0
+    session = _new_session(url)  # only opened lazily if a huge compressed file (>8 MB) appears
+
+    def fill_window():
+        nonlocal next_idx, buffered_bytes
+        while next_idx < len(records) and len(in_flight) < 6:
+            _, inf = records[next_idx]
+            if inf.file_size <= SMALL_LIMIT and (buffered_bytes + inf.file_size <= MAX_INFLIGHT_BYTES or not in_flight):
+                in_flight[next_idx] = (ex.submit(_fetch_zip_member_small, url, inf), inf.file_size)
+                buffered_bytes += inf.file_size
+                next_idx += 1
+            elif inf.file_size > SMALL_LIMIT:
+                next_idx += 1  # skip large files for prefetch; they stream directly
+            else:
+                break
+
+    try:
+        fill_window()
+        for i, (local_hdr, info) in enumerate(records):
+            if i >= next_idx:
+                next_idx = i + 1
+            fill_window()
+            yield local_hdr
+            if i in in_flight:
+                fut, sz = in_flight.pop(i)
+                buffered_bytes -= sz
+                fill_window()
+                yield fut.result()
+            elif info.compress_type == 0 and info.file_size > 2 * 1024 * 1024:
+                yield from _stream_stored_parallel(url, info)
+            else:
+                yield from stream_member(session, info)
+        yield trailer
+    finally:
+        for fut, _ in in_flight.values():
+            fut.cancel()
+        ex.shutdown(wait=False)
+        session.close()
+
+
+def _pick_cached_zip_infos(url):
+    with ZIP_CACHE_LOCK:
+        cached = ZIP_CACHE.get(url)
+        if cached and cached.get('zip_infos'):
+            return list(cached['zip_infos'].values())
+    return None
+
+
+def _zip_response(url, picker, zip_name):
+    infos = _pick_cached_zip_infos(url)
+    if infos is None:
+        with _make_remote_zip(url) as rz:
+            infos = rz.infolist()
+    try:
+        members = picker(infos)
         if not members:
-            session.close()
             return "No matching files in archive", 404
         locked = [n for n, i in members if i.flag_bits & 0x1]
         if locked:
-            session.close()
             return ("Cannot stream password-protected files: "
                     + ", ".join(locked[:5]) + (" ..." if len(locked) > 5 else "")), 400
         records, trailer, total = build_zip_plan(members)
     except Exception as e:
-        session.close()
         return f"Error preparing archive: {e}", 500
-    return Response(stream_with_context(stream_zip(session, records, trailer)),
+    return Response(stream_with_context(stream_zip_fast(url, records, trailer)),
                     headers=_attachment_headers(zip_name, total, "application/zip"))
 
 
@@ -3886,6 +4004,21 @@ def download():
                         headers=_attachment_headers(base, f_obj['size'], mime or "application/octet-stream"))
 
     # 2. Handle Standard ZIP Archives
+    infos = _pick_cached_zip_infos(url)
+    info = next((i for i in infos if _norm(i.filename) == wanted), None) if infos else None
+
+    if info is not None:
+        if info.flag_bits & 0x1:
+            return "File is password protected", 400
+        base = os.path.basename(wanted)
+        if info.compress_type == 0 and info.file_size > 2 * 1024 * 1024:
+            gen = _stream_stored_parallel(url, info)
+        else:
+            gen = _iter_zip_member_direct(url, info)
+        return Response(stream_with_context(gen),
+                        headers=_attachment_headers(base, info.file_size, "application/octet-stream"))
+
+    # Fallback if cache missed (e.g. direct link after server restart)
     session = _new_session(url)
     try:
         info = next((i for i in session.get().infolist() if _norm(i.filename) == wanted), None)
@@ -3932,9 +4065,9 @@ def download_folder():
         return _rar_zip_response(url, matched, zip_name)
 
     # 2. Handle ZIP Archives
-    def picker(rz):
+    def picker(infos):
         out = []
-        for info in rz.infolist():
+        for info in infos:
             n = _norm(info.filename)
             if n.endswith('/'):
                 continue
@@ -3965,9 +4098,9 @@ def download_batch():
         return _rar_zip_response(url, out, 'selected_files.zip')
 
     # 2. Handle ZIP Archives
-    def picker(rz):
+    def picker(infos):
         out, used = [], set()
-        for info in rz.infolist():
+        for info in infos:
             n = _norm(info.filename)
             if n.endswith('/'):
                 continue

@@ -11,7 +11,7 @@ set "RAW_BASE=https://raw.githubusercontent.com/%GITHUB_USER%/%GITHUB_REPO%/%BRA
 echo [*] Checking for updates...
 
 :: Loop through all files to update only if newer
-for %%F in (requirements.txt fileex2.py ZipInspector.exe) do (
+for %%F in (requirements.txt fileex2.py) do (
     if not exist "%%F" (
         echo [*] Downloading %%F...
         curl -s -f -L -R -o "%%F" "%RAW_BASE%/%%F"
